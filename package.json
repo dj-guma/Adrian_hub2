@@ -1,14 +1,16 @@
 
 {
   "name": "adrians-hub",
-  "version": "1.0.0",
-  "description": "Adrian's Hub backend",
+  "version": "2.0.0",
+  "description": "Adrian's Hub game backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^5.1.0",
-    "cors": "^2.8.5"
+    "adm-zip": "^0.5.16",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.2"
   }
 }
