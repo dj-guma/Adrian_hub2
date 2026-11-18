@@ -1,7 +1,7 @@
 
 {
   "name": "adrians-hub",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Adrian's Hub backend",
   "main": "server.js",
   "scripts": {
@@ -11,6 +11,7 @@
     "adm-zip": "^0.5.16",
     "cors": "^2.8.5",
     "express": "^4.21.2",
-    "multer": "^1.4.5-lts.2"
+    "multer": "^1.4.5-lts.2",
+    "pg": "^8.13.1"
   }
 }
