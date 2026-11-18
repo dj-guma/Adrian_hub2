@@ -6,7 +6,6 @@ const AdmZip = require("adm-zip");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { Pool } = require("pg");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,63 +13,17 @@ const PORT = process.env.PORT || 3000;
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 const GAMES_DIR = path.join(UPLOADS_DIR, "games");
 const DATA_FILE = path.join(UPLOADS_DIR, "games.json");
-
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
-const DATABASE_URL = process.env.DATABASE_URL;
-
-if (!DATABASE_URL) {
-  console.error("DATABASE_URL is missing. Add it in Render environment variables.");
-  process.exit(1);
-}
-
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
 
 fs.mkdirSync(GAMES_DIR, { recursive: true });
 
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "x-admin-password"]
-}));
-
+app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 50 * 1024 * 1024,
-    files: 500
-  }
+  limits: { fileSize: 50 * 1024 * 1024, files: 500 }
 });
-
-// DATABASE SETUP
-
-async function setupDatabase() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS hub_chat (
-      id BIGSERIAL PRIMARY KEY,
-      username VARCHAR(40) NOT NULL DEFAULT 'Guest',
-      message TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS hub_suggestions (
-      id BIGSERIAL PRIMARY KEY,
-      username VARCHAR(40) NOT NULL DEFAULT 'Guest',
-      suggestion TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-
-  console.log("Chat and Suggestions database is ready.");
-}
-
-// GAME STORAGE
 
 function readGames() {
   try {
@@ -86,9 +39,7 @@ function writeGames(games) {
 
 function requireAdmin(req, res, next) {
   if (!ADMIN_PASSWORD) {
-    return res.status(500).json({
-      error: "ADMIN_PASSWORD has not been set in Render environment variables."
-    });
+    return res.status(500).json({ error: "ADMIN_PASSWORD is missing in Render." });
   }
 
   if (req.get("x-admin-password") !== ADMIN_PASSWORD) {
@@ -98,18 +49,11 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-function safeRelativePath(input) {
-  const cleaned = String(input || "")
-    .replace(/\\/g, "/")
-    .replace(/^\/+/, "");
-
+function safePath(input) {
+  const cleaned = String(input || "").replace(/\\/g, "/").replace(/^\/+/, "");
   const parts = cleaned.split("/").filter(Boolean);
 
-  if (
-    !parts.length ||
-    parts.some(part => part === "." || part === "..") ||
-    cleaned.includes("\0")
-  ) {
+  if (!parts.length || parts.some(p => p === "." || p === "..") || cleaned.includes("\0")) {
     throw new Error("Invalid file path.");
   }
 
@@ -117,178 +61,86 @@ function safeRelativePath(input) {
 }
 
 function findIndexFile(folder) {
-  const matches = [];
+  const found = [];
 
-  function walk(current) {
-    for (const item of fs.readdirSync(current, { withFileTypes: true })) {
-      const full = path.join(current, item.name);
+  function walk(dir) {
+    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, item.name);
 
-      if (item.isDirectory()) {
-        walk(full);
-      } else if (item.name.toLowerCase() === "index.html") {
-        matches.push(full);
-      }
+      if (item.isDirectory()) walk(full);
+      else if (item.name.toLowerCase() === "index.html") found.push(full);
     }
   }
 
   walk(folder);
-  return matches[0] || null;
+  return found[0] || null;
 }
 
-function getGameName(req, fallback) {
-  const name = String(req.body.name || fallback || "Uploaded Game").trim();
-  return name.slice(0, 80) || "Uploaded Game";
+function getGame(id) {
+  return readGames().find(game => game.id === id);
 }
-
-// SHARED CHAT
-
-app.get("/api/chat", async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT id, username, message, created_at
-      FROM hub_chat
-      ORDER BY id ASC
-      LIMIT 500
-    `);
-
-    res.json({ messages: result.rows });
-  } catch (error) {
-    console.error("Chat load error:", error);
-    res.status(500).json({ error: "Could not load chat." });
-  }
-});
-
-app.post("/api/chat", async (req, res) => {
-  try {
-    const message = String(
-      req.body.message || req.body.text || req.body.content || ""
-    ).trim();
-
-    const username = String(req.body.username || "Guest")
-      .trim()
-      .slice(0, 40) || "Guest";
-
-    if (!message || message.length > 2000) {
-      return res.status(400).json({
-        error: "Messages must contain between 1 and 2000 characters."
-      });
-    }
-
-    const result = await pool.query(
-      `INSERT INTO hub_chat (username, message)
-       VALUES ($1, $2)
-       RETURNING id, username, message, created_at`,
-      [username, message]
-    );
-
-    res.json({
-      success: true,
-      message: result.rows[0]
-    });
-  } catch (error) {
-    console.error("Chat save error:", error);
-    res.status(500).json({ error: "Could not save message." });
-  }
-});
-
-// SHARED SUGGESTIONS
-
-app.get("/api/suggestions", async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT id, username, suggestion, created_at
-      FROM hub_suggestions
-      ORDER BY id DESC
-      LIMIT 500
-    `);
-
-    res.json({ suggestions: result.rows });
-  } catch (error) {
-    console.error("Suggestions load error:", error);
-    res.status(500).json({ error: "Could not load suggestions." });
-  }
-});
-
-app.post("/api/suggestions", async (req, res) => {
-  try {
-    const suggestion = String(
-      req.body.suggestion || req.body.text || req.body.content || ""
-    ).trim();
-
-    const username = String(req.body.username || "Guest")
-      .trim()
-      .slice(0, 40) || "Guest";
-
-    if (!suggestion || suggestion.length > 2000) {
-      return res.status(400).json({
-        error: "Suggestions must contain between 1 and 2000 characters."
-      });
-    }
-
-    const result = await pool.query(
-      `INSERT INTO hub_suggestions (username, suggestion)
-       VALUES ($1, $2)
-       RETURNING id, username, suggestion, created_at`,
-      [username, suggestion]
-    );
-
-    res.json({
-      success: true,
-      suggestion: result.rows[0]
-    });
-  } catch (error) {
-    console.error("Suggestion save error:", error);
-    res.status(500).json({ error: "Could not save suggestion." });
-  }
-});
-
-// HOMEPAGE AND STATUS
 
 app.get("/", (req, res) => {
   res.send("Adrian's Hub backend is running!");
 });
 
 app.get("/api/health", (req, res) => {
-  res.json({
-    status: "online",
-    name: "Adrian's Hub",
-    version: "3.0.0"
-  });
+  res.json({ status: "online", name: "Adrian's Hub", version: "3.0.0" });
 });
 
 app.get("/api/admin/check", requireAdmin, (req, res) => {
   res.json({ success: true });
 });
 
-// GAMES
-
 app.get("/api/games", (req, res) => {
-  const uploaded = readGames();
-
   const builtIn = [
-    { name: "Coolmath Games", url: "https://www.coolmathgames.com", type: "website" },
-    { name: "Poki", url: "https://poki.com", type: "website" },
-    { name: "CrazyGames", url: "https://www.crazygames.com", type: "website" },
-    { name: "Chess", url: "https://www.chess.com", type: "website" }
+    {
+      id: "cookie-clicker",
+      name: "Cookie Clicker",
+      url: "https://orteil.dashnet.org/cookieclicker/",
+      type: "website"
+    },
+    {
+      id: "coolmath",
+      name: "Coolmath Games",
+      url: "https://www.coolmathgames.com/",
+      type: "website"
+    },
+    {
+      id: "poki",
+      name: "Poki",
+      url: "https://poki.com/",
+      type: "website"
+    },
+    {
+      id: "crazygames",
+      name: "CrazyGames",
+      url: "https://www.crazygames.com/",
+      type: "website"
+    },
+    {
+      id: "chess",
+      name: "Chess",
+      url: "https://www.chess.com/",
+      type: "website"
+    }
   ];
 
-  res.json([...builtIn, ...uploaded]);
+  res.json([...builtIn, ...readGames()]);
 });
 
 app.post("/api/games/upload", requireAdmin, upload.array("files", 500), (req, res) => {
-  let gameId;
+  let folder;
 
   try {
     const files = req.files || [];
-
     if (!files.length) {
-      return res.status(400).json({ error: "No files were uploaded." });
+      return res.status(400).json({ error: "Choose game files first." });
     }
 
-    gameId = crypto.randomUUID();
-
-    const gameFolder = path.join(GAMES_DIR, gameId);
-    fs.mkdirSync(gameFolder, { recursive: true });
+    const id = crypto.randomUUID();
+    folder = path.join(GAMES_DIR, id);
+    fs.mkdirSync(folder, { recursive: true });
 
     const isZip = files.length === 1 &&
       path.extname(files[0].originalname).toLowerCase() === ".zip";
@@ -297,27 +149,25 @@ app.post("/api/games/upload", requireAdmin, upload.array("files", 500), (req, re
       const zip = new AdmZip(files[0].buffer);
       const entries = zip.getEntries();
 
-      if (entries.length > 3000) {
-        throw new Error("That ZIP contains too many files.");
-      }
+      if (entries.length > 3000) throw new Error("Too many files in ZIP.");
 
-      let totalSize = 0;
+      let total = 0;
 
       for (const entry of entries) {
         if (entry.isDirectory) continue;
 
-        const relative = safeRelativePath(entry.entryName);
-        const destination = path.resolve(gameFolder, relative);
+        const relative = safePath(entry.entryName);
+        const destination = path.resolve(folder, relative);
 
-        if (!destination.startsWith(path.resolve(gameFolder) + path.sep)) {
-          throw new Error("Invalid ZIP file path.");
+        if (!destination.startsWith(path.resolve(folder) + path.sep)) {
+          throw new Error("Invalid ZIP path.");
         }
 
         const data = entry.getData();
-        totalSize += data.length;
+        total += data.length;
 
-        if (totalSize > 100 * 1024 * 1024) {
-          throw new Error("The uncompressed ZIP is too large.");
+        if (total > 100 * 1024 * 1024) {
+          throw new Error("Uncompressed ZIP is too large.");
         }
 
         fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -325,11 +175,11 @@ app.post("/api/games/upload", requireAdmin, upload.array("files", 500), (req, re
       }
     } else {
       for (const file of files) {
-        const relative = safeRelativePath(file.originalname);
-        const destination = path.resolve(gameFolder, relative);
+        const relative = safePath(file.originalname);
+        const destination = path.resolve(folder, relative);
 
-        if (!destination.startsWith(path.resolve(gameFolder) + path.sep)) {
-          throw new Error("Invalid uploaded file path.");
+        if (!destination.startsWith(path.resolve(folder) + path.sep)) {
+          throw new Error("Invalid uploaded path.");
         }
 
         fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -337,91 +187,91 @@ app.post("/api/games/upload", requireAdmin, upload.array("files", 500), (req, re
       }
     }
 
-    const indexFile = findIndexFile(gameFolder);
+    const indexFile = findIndexFile(folder);
 
-    if (!indexFile) {
-      fs.rmSync(gameFolder, { recursive: true, force: true });
-      return res.status(400).json({
-        error: "Couldn't find index.html. Your game needs an index.html file."
-      });
-    }
+    if (!indexFile) throw new Error("Your game needs an index.html file.");
 
-    const games = readGames();
+    const name = String(req.body.name || "Uploaded Game").trim().slice(0, 80) || "Uploaded Game";
 
     const game = {
-      id: gameId,
-      name: getGameName(req, path.basename(files[0].originalname, path.extname(files[0].originalname))),
+      id,
+      name,
       type: "uploaded",
-      entry: path.relative(gameFolder, indexFile).split(path.sep).join("/")
+      entry: path.relative(folder, indexFile).split(path.sep).join("/")
     };
 
+    const games = readGames();
     games.push(game);
     writeGames(games);
 
     res.json({ success: true, game });
   } catch (error) {
-    if (gameId) {
-      fs.rmSync(path.join(GAMES_DIR, gameId), { recursive: true, force: true });
-    }
-
-    res.status(400).json({
-      error: error.message || "Upload failed."
-    });
+    if (folder) fs.rmSync(folder, { recursive: true, force: true });
+    res.status(400).json({ error: error.message || "Upload failed." });
   }
 });
 
+// Serve the game's main HTML file.
 app.get("/play/:id", (req, res) => {
-  const game = readGames().find(item => item.id === req.params.id);
-
-  if (!game) {
-    return res.status(404).send("Game not found.");
-  }
+  const game = getGame(req.params.id);
+  if (!game) return res.status(404).send("Game not found.");
 
   const folder = path.resolve(GAMES_DIR, game.id);
   const entry = path.resolve(folder, game.entry || "index.html");
 
   if (!entry.startsWith(folder + path.sep) || !fs.existsSync(entry)) {
-    return res.status(404).send("Game files could not be found.");
+    return res.status(404).send("Game files not found.");
   }
 
-  res.sendFile(entry);
+  let html = fs.readFileSync(entry, "utf8");
+  const basePath = "/play/" + game.id + "/" +
+    path.dirname(game.entry).split(path.sep).join("/") + "/";
+
+  const baseTag = `<base href="${basePath.replace(/\/+/g, "/")}">`;
+
+  if (/<head[^>]*>/i.test(html)) {
+    html = html.replace(/<head[^>]*>/i, match => match + baseTag);
+  } else {
+    html = baseTag + html;
+  }
+
+  res.type("html").send(html);
 });
 
-app.use("/game-files", express.static(GAMES_DIR, {
-  fallthrough: false,
-  dotfiles: "deny",
-  index: false
-}));
+// Serve scripts, images, stylesheets, and other game files.
+app.get("/play/:id/*", (req, res) => {
+  const game = getGame(req.params.id);
+  if (!game) return res.status(404).send("Game not found.");
+
+  try {
+    const relative = safePath(req.params[0]);
+    const folder = path.resolve(GAMES_DIR, game.id);
+    const file = path.resolve(folder, relative);
+
+    if (!file.startsWith(folder + path.sep) || !fs.existsSync(file)) {
+      return res.status(404).send("Game file not found.");
+    }
+
+    res.sendFile(file);
+  } catch {
+    res.status(400).send("Invalid file path.");
+  }
+});
 
 app.delete("/api/games/:id", requireAdmin, (req, res) => {
   const games = readGames();
   const game = games.find(item => item.id === req.params.id);
 
-  if (!game) {
-    return res.status(404).json({ error: "Game not found." });
+  if (!game || game.type !== "uploaded") {
+    return res.status(404).json({ error: "Uploaded game not found." });
   }
 
-  const folder = path.join(GAMES_DIR, game.id);
-  fs.rmSync(folder, { recursive: true, force: true });
-
+  fs.rmSync(path.join(GAMES_DIR, game.id), { recursive: true, force: true });
   writeGames(games.filter(item => item.id !== game.id));
 
   res.json({ success: true });
 });
 
-// START SERVER AFTER DATABASE IS READY
-
-async function startServer() {
-  try {
-    await setupDatabase();
-
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Adrian's Hub running on port ${PORT}`);
-    });
-  } catch (error) {
-    console.error("Could not connect to the database:", error);
-    process.exit(1);
-  }
-}
-
-startServer();
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Adrian's Hub running on port ${PORT}`);
+});
