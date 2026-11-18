@@ -10,127 +10,96 @@ const crypto = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const DATA_DIR = path.join(__dirname, "data");
-const GAMES_DIR = path.join(DATA_DIR, "games");
-const DB_FILE = path.join(DATA_DIR, "games.json");
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "adrianhubv3";
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+const GAMES_DIR = path.join(UPLOADS_DIR, "games");
+const DATA_FILE = path.join(UPLOADS_DIR, "games.json");
+
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 fs.mkdirSync(GAMES_DIR, { recursive: true });
 
-app.use(cors());
-app.use(express.json({ limit: "15mb" }));
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "x-admin-password"]
+}));
+
+app.use(express.json());
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024, files: 200 }
+  limits: {
+    fileSize: 50 * 1024 * 1024,
+    files: 500
+  }
 });
 
 function readGames() {
   try {
-    return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+    return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
   } catch {
     return [];
   }
 }
 
-function saveGames(games) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(games, null, 2));
+function writeGames(games) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(games, null, 2));
 }
 
-function checkAdmin(req, res, next) {
-  const password = req.headers["x-admin-password"];
+function requireAdmin(req, res, next) {
+  if (!ADMIN_PASSWORD) {
+    return res.status(500).json({
+      error: "ADMIN_PASSWORD has not been set in Render environment variables."
+    });
+  }
 
-  if (!password || password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Admin password is incorrect." });
+  if (req.get("x-admin-password") !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "Incorrect admin password." });
   }
 
   next();
 }
 
-function safePath(name) {
-  const cleaned = String(name || "")
+function safeRelativePath(input) {
+  const cleaned = String(input || "")
     .replace(/\\/g, "/")
     .replace(/^\/+/, "");
 
-  const parts = cleaned.split("/");
+  const parts = cleaned.split("/").filter(Boolean);
 
   if (
-    !cleaned ||
-    parts.some(part => part === ".." || part === "." || !part)
+    !parts.length ||
+    parts.some(part => part === "." || part === "..") ||
+    cleaned.includes("\0")
   ) {
     throw new Error("Invalid file path.");
   }
 
-  return parts.join("/");
+  return parts.join(path.sep);
 }
 
-function writeGameFile(gameDir, relativeName, buffer) {
-  const safeName = safePath(relativeName);
-  const destination = path.resolve(gameDir, safeName);
-  const base = path.resolve(gameDir) + path.sep;
+function findIndexFile(folder) {
+  const matches = [];
 
-  if (!destination.startsWith(base)) {
-    throw new Error("Invalid file location.");
-  }
+  function walk(current) {
+    for (const item of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, item.name);
 
-  fs.mkdirSync(path.dirname(destination), { recursive: true });
-  fs.writeFileSync(destination, buffer);
-}
-
-function findIndexFile(folder, relative = "") {
-  const entries = fs.readdirSync(folder, { withFileTypes: true });
-
-  for (const entry of entries) {
-    const rel = path.posix.join(relative, entry.name);
-
-    if (entry.isFile() && entry.name.toLowerCase() === "index.html") {
-      return rel;
+      if (item.isDirectory()) {
+        walk(full);
+      } else if (item.name.toLowerCase() === "index.html") {
+        matches.push(full);
+      }
     }
   }
 
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      const found = findIndexFile(
-        path.join(folder, entry.name),
-        path.posix.join(relative, entry.name)
-      );
-
-      if (found) return found;
-    }
-  }
-
-  return null;
+  walk(folder);
+  return matches[0] || null;
 }
 
-function makeGame(name, files) {
-  const id = crypto.randomUUID();
-  const gameDir = path.join(GAMES_DIR, id);
-
-  fs.mkdirSync(gameDir, { recursive: true });
-
-  for (const file of files) {
-    writeGameFile(gameDir, file.name, file.data);
-  }
-
-  const entry = findIndexFile(gameDir);
-
-  if (!entry) {
-    fs.rmSync(gameDir, { recursive: true, force: true });
-    throw new Error("No index.html was found in that game.");
-  }
-
-  const game = {
-    id,
-    name: String(name || "Uploaded Game").slice(0, 80),
-    entry,
-    createdAt: new Date().toISOString()
-  };
-
-  const games = readGames();
-  games.push(game);
-  saveGames(games);
-
-  return game;
+function getGameName(req, fallback) {
+  const name = String(req.body.name || fallback || "Uploaded Game").trim();
+  return name.slice(0, 80) || "Uploaded Game";
 }
 
 app.get("/", (req, res) => {
@@ -145,154 +114,154 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-app.post("/api/admin/login", (req, res) => {
-  if (req.body.password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Incorrect password." });
-  }
-
+app.get("/api/admin/check", requireAdmin, (req, res) => {
   res.json({ success: true });
 });
 
 app.get("/api/games", (req, res) => {
   const uploaded = readGames();
 
-  res.json([
-    {
-      name: "Coolmath Games",
-      url: "https://www.coolmathgames.com",
-      type: "external"
-    },
-    {
-      name: "Poki",
-      url: "https://poki.com",
-      type: "external"
-    },
-    {
-      name: "CrazyGames",
-      url: "https://www.crazygames.com",
-      type: "external"
-    },
-    {
-      name: "Chess",
-      url: "https://www.chess.com",
-      type: "external"
-    },
-    ...uploaded.map(game => ({
-      ...game,
-      type: "uploaded",
-      url: `/play/${game.id}`
-    }))
-  ]);
+  const builtIn = [
+    { name: "Coolmath Games", url: "https://www.coolmathgames.com", type: "website" },
+    { name: "Poki", url: "https://poki.com", type: "website" },
+    { name: "CrazyGames", url: "https://www.crazygames.com", type: "website" },
+    { name: "Chess", url: "https://www.chess.com", type: "website" }
+  ];
+
+  res.json([...builtIn, ...uploaded]);
 });
 
-// Upload a ZIP or a folder of game files.
-app.post(
-  "/api/games/upload",
-  checkAdmin,
-  upload.array("files", 200),
-  (req, res) => {
-    try {
-      if (!req.files || req.files.length === 0) {
-        return res.status(400).json({ error: "No files were uploaded." });
-      }
+app.post("/api/games/upload", requireAdmin, upload.array("files", 500), (req, res) => {
+  let gameId;
 
-      let files = [];
-
-      for (const file of req.files) {
-        const originalName = file.originalname.replace(/\\/g, "/");
-
-        if (originalName.toLowerCase().endsWith(".zip")) {
-          const zip = new AdmZip(file.buffer);
-
-          for (const entry of zip.getEntries()) {
-            if (entry.isDirectory) continue;
-
-            files.push({
-              name: entry.entryName,
-              data: entry.getData()
-            });
-          }
-        } else {
-          files.push({
-            name: originalName,
-            data: file.buffer
-          });
-        }
-      }
-
-      if (files.length === 0) {
-        return res.status(400).json({ error: "The upload contained no files." });
-      }
-
-      const game = makeGame(req.body.name, files);
-      res.json({ success: true, game });
-    } catch (error) {
-      res.status(400).json({ error: error.message });
-    }
-  }
-);
-
-// Publish raw HTML code as a game.
-app.post("/api/games/raw", checkAdmin, (req, res) => {
   try {
-    const html = req.body.html;
+    const files = req.files || [];
 
-    if (typeof html !== "string" || !html.trim()) {
-      return res.status(400).json({ error: "Paste your game's HTML first." });
+    if (!files.length) {
+      return res.status(400).json({ error: "No files were uploaded." });
     }
 
-    const game = makeGame(req.body.name, [
-      { name: "index.html", data: Buffer.from(html, "utf8") }
-    ]);
+    gameId = crypto.randomUUID();
+
+    const gameFolder = path.join(GAMES_DIR, gameId);
+    fs.mkdirSync(gameFolder, { recursive: true });
+
+    const isZip = files.length === 1 &&
+      path.extname(files[0].originalname).toLowerCase() === ".zip";
+
+    if (isZip) {
+      const zip = new AdmZip(files[0].buffer);
+      const entries = zip.getEntries();
+
+      if (entries.length > 3000) {
+        throw new Error("That ZIP contains too many files.");
+      }
+
+      let totalSize = 0;
+
+      for (const entry of entries) {
+        if (entry.isDirectory) continue;
+
+        const relative = safeRelativePath(entry.entryName);
+        const destination = path.resolve(gameFolder, relative);
+
+        if (!destination.startsWith(path.resolve(gameFolder) + path.sep)) {
+          throw new Error("Invalid ZIP file path.");
+        }
+
+        const data = entry.getData();
+        totalSize += data.length;
+
+        if (totalSize > 100 * 1024 * 1024) {
+          throw new Error("The uncompressed ZIP is too large.");
+        }
+
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.writeFileSync(destination, data);
+      }
+    } else {
+      for (const file of files) {
+        const relative = safeRelativePath(file.originalname);
+        const destination = path.resolve(gameFolder, relative);
+
+        if (!destination.startsWith(path.resolve(gameFolder) + path.sep)) {
+          throw new Error("Invalid uploaded file path.");
+        }
+
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.writeFileSync(destination, file.buffer);
+      }
+    }
+
+    const indexFile = findIndexFile(gameFolder);
+
+    if (!indexFile) {
+      fs.rmSync(gameFolder, { recursive: true, force: true });
+      return res.status(400).json({
+        error: "Couldn't find index.html. Your game needs an index.html file."
+      });
+    }
+
+    const games = readGames();
+
+    const game = {
+      id: gameId,
+      name: getGameName(req, path.basename(files[0].originalname, path.extname(files[0].originalname))),
+      type: "uploaded",
+      entry: path.relative(gameFolder, indexFile).split(path.sep).join("/")
+    };
+
+    games.push(game);
+    writeGames(games);
 
     res.json({ success: true, game });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    if (gameId) {
+      fs.rmSync(path.join(GAMES_DIR, gameId), { recursive: true, force: true });
+    }
+
+    res.status(400).json({
+      error: error.message || "Upload failed."
+    });
   }
 });
 
-// Serve uploaded game files.
 app.get("/play/:id", (req, res) => {
   const game = readGames().find(item => item.id === req.params.id);
 
-  if (!game) return res.status(404).send("Game not found.");
-
-  res.redirect(`/play/${game.id}/${game.entry.split("/").map(encodeURIComponent).join("/")}`);
-});
-
-app.get("/play/:id/*", (req, res) => {
-  const game = readGames().find(item => item.id === req.params.id);
-
-  if (!game) return res.status(404).send("Game not found.");
-
-  try {
-    const requested = safePath(req.params[0] || game.entry);
-    const gameDir = path.resolve(GAMES_DIR, game.id);
-    const filePath = path.resolve(gameDir, requested);
-
-    if (!filePath.startsWith(gameDir + path.sep) || !fs.existsSync(filePath)) {
-      return res.status(404).send("Game file not found.");
-    }
-
-    res.sendFile(filePath);
-  } catch {
-    res.status(400).send("Invalid file path.");
+  if (!game) {
+    return res.status(404).send("Game not found.");
   }
+
+  const folder = path.resolve(GAMES_DIR, game.id);
+  const entry = path.resolve(folder, game.entry || "index.html");
+
+  if (!entry.startsWith(folder + path.sep) || !fs.existsSync(entry)) {
+    return res.status(404).send("Game files could not be found.");
+  }
+
+  res.sendFile(entry);
 });
 
-// Only an authenticated admin can delete games.
-app.delete("/api/games/:id", checkAdmin, (req, res) => {
+app.use("/game-files", express.static(GAMES_DIR, {
+  fallthrough: false,
+  dotfiles: "deny",
+  index: false
+}));
+
+app.delete("/api/games/:id", requireAdmin, (req, res) => {
   const games = readGames();
   const game = games.find(item => item.id === req.params.id);
 
-  if (!game) return res.status(404).json({ error: "Game not found." });
+  if (!game) {
+    return res.status(404).json({ error: "Game not found." });
+  }
 
-  fs.rmSync(path.join(GAMES_DIR, game.id), {
-    recursive: true,
-    force: true
-  });
+  const folder = path.join(GAMES_DIR, game.id);
+  fs.rmSync(folder, { recursive: true, force: true });
 
-  saveGames(games.filter(item => item.id !== game.id));
+  writeGames(games.filter(item => item.id !== game.id));
+
   res.json({ success: true });
 });
 
