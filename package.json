@@ -2,7 +2,7 @@
 {
   "name": "adrians-hub",
   "version": "2.0.0",
-  "description": "Adrian's Hub game backend",
+  "description": "Adrian's Hub backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
