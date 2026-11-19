@@ -21,7 +21,6 @@ fs.mkdirSync(GAMES_DIR, { recursive: true });
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-// PostgreSQL connection
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -72,7 +71,6 @@ function requireDatabase(req, res, next) {
       error: "The database is not connected yet. Try again in a moment."
     });
   }
-
   next();
 }
 
@@ -148,7 +146,6 @@ function getGame(id) {
   return readGames().find(game => game.id === id);
 }
 
-// Basic status check
 app.get("/", (req, res) => {
   res.send("Adrian's Hub backend is running!");
 });
@@ -169,7 +166,7 @@ app.get("/api/health", async (req, res) => {
   res.status(connected ? 200 : 503).json({
     status: "online",
     name: "Adrian's Hub",
-    version: "3.1.0",
+    version: "3.2.0",
     database: connected ? "connected" : "disconnected"
   });
 });
@@ -188,7 +185,7 @@ app.get("/api/chat", requireDatabase, async (req, res) => {
       ORDER BY created_at ASC
     `);
 
-    const messages = result.rows.map(row => ({
+    res.json(result.rows.map(row => ({
       id: row.id,
       username: row.username,
       message: row.message,
@@ -196,9 +193,7 @@ app.get("/api/chat", requireDatabase, async (req, res) => {
       content: row.message,
       created_at: row.created_at,
       createdAt: row.created_at
-    }));
-
-    res.json(messages);
+    })));
   } catch (error) {
     console.error("Chat load error:", error);
     res.status(500).json({ error: "Could not load chat messages." });
@@ -208,8 +203,7 @@ app.get("/api/chat", requireDatabase, async (req, res) => {
 app.post("/api/chat", requireDatabase, async (req, res) => {
   try {
     const username = String(req.body.username || "Guest")
-      .trim()
-      .slice(0, 30) || "Guest";
+      .trim().slice(0, 30) || "Guest";
 
     const message = String(
       req.body.message || req.body.text || req.body.content || ""
@@ -278,8 +272,7 @@ app.get("/api/suggestions", requireDatabase, async (req, res) => {
 app.post("/api/suggestions", requireDatabase, async (req, res) => {
   try {
     const username = String(req.body.username || "Guest")
-      .trim()
-      .slice(0, 30) || "Guest";
+      .trim().slice(0, 30) || "Guest";
 
     const suggestion = String(
       req.body.suggestion || req.body.text || req.body.message || ""
@@ -325,7 +318,7 @@ app.get("/api/admin/check", requireAdmin, (req, res) => {
   res.json({ success: true });
 });
 
-// GAMES
+// GAMES LIST
 app.get("/api/games", (req, res) => {
   const builtIn = [
     {
@@ -363,6 +356,7 @@ app.get("/api/games", (req, res) => {
   res.json([...builtIn, ...readGames()]);
 });
 
+// GAME UPLOADER: HTML AND ZIP FILES
 app.post(
   "/api/games/upload",
   requireAdmin,
@@ -375,7 +369,7 @@ app.post(
 
       if (!files.length) {
         return res.status(400).json({
-          error: "Choose game files first."
+          error: "Choose an HTML or ZIP game file first."
         });
       }
 
@@ -386,6 +380,12 @@ app.post(
       const isZip =
         files.length === 1 &&
         path.extname(files[0].originalname).toLowerCase() === ".zip";
+
+      const isSingleHtml =
+        files.length === 1 &&
+        [".html", ".htm"].includes(
+          path.extname(files[0].originalname).toLowerCase()
+        );
 
       if (isZip) {
         const zip = new AdmZip(files[0].buffer);
@@ -417,6 +417,11 @@ app.post(
           fs.mkdirSync(path.dirname(destination), { recursive: true });
           fs.writeFileSync(destination, data);
         }
+      } else if (isSingleHtml) {
+        fs.writeFileSync(
+          path.join(folder, "index.html"),
+          files[0].buffer
+        );
       } else {
         for (const file of files) {
           const relative = safePath(file.originalname);
@@ -434,25 +439,31 @@ app.post(
       const indexFile = findIndexFile(folder);
 
       if (!indexFile) {
-        throw new Error("Your game needs an index.html file.");
+        throw new Error(
+          "Your game needs an index.html file. Upload an HTML file or a ZIP containing index.html."
+        );
       }
 
       const name = String(req.body.name || "Uploaded Game")
-        .trim()
-        .slice(0, 80) || "Uploaded Game";
+        .trim().slice(0, 80) || "Uploaded Game";
 
       const game = {
         id,
         name,
         type: "uploaded",
-        entry: path.relative(folder, indexFile).split(path.sep).join("/")
+        entry: path.relative(folder, indexFile)
+          .split(path.sep).join("/")
       };
 
       const games = readGames();
       games.push(game);
       writeGames(games);
 
-      res.json({ success: true, game });
+      res.json({
+        success: true,
+        message: "Game uploaded successfully!",
+        game
+      });
     } catch (error) {
       if (folder) {
         fs.rmSync(folder, { recursive: true, force: true });
@@ -465,7 +476,7 @@ app.post(
   }
 );
 
-// Serve the game's main HTML file.
+// SERVE THE GAME HTML
 app.get("/play/:id", (req, res) => {
   const game = getGame(req.params.id);
   if (!game) return res.status(404).send("Game not found.");
@@ -480,7 +491,8 @@ app.get("/play/:id", (req, res) => {
   let html = fs.readFileSync(entry, "utf8");
   const entryDirectory = path.dirname(game.entry || "index.html");
   const basePath = "/play/" + game.id + "/" +
-    (entryDirectory === "." ? "" : entryDirectory.split(path.sep).join("/") + "/");
+    (entryDirectory === "." ? "" :
+      entryDirectory.split(path.sep).join("/") + "/");
 
   const baseTag = `<base href="${basePath}">`;
 
@@ -493,7 +505,7 @@ app.get("/play/:id", (req, res) => {
   res.type("html").send(html);
 });
 
-// Serve game scripts, images, stylesheets, and other files.
+// SERVE GAME ASSETS
 app.get("/play/:id/*", (req, res) => {
   const game = getGame(req.params.id);
   if (!game) return res.status(404).send("Game not found.");
@@ -513,6 +525,7 @@ app.get("/play/:id/*", (req, res) => {
   }
 });
 
+// DELETE UPLOADED GAME
 app.delete("/api/games/:id", requireAdmin, (req, res) => {
   const games = readGames();
   const game = games.find(item => item.id === req.params.id);
@@ -533,7 +546,7 @@ app.delete("/api/games/:id", requireAdmin, (req, res) => {
   res.json({ success: true });
 });
 
-// Start the server, then connect to the database.
+// START SERVER
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Adrian's Hub running on port ${PORT}`);
 
